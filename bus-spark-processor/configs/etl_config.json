@@ -1,0 +1,10 @@
+{
+  "steps_per_floor": 21,
+  "kafka_bootstrap_server": "10.252.62.70:9092",
+  "topic_bus_location": "bus_location",
+  "topic_driver_fatigue": "driver_fatigue_detection",
+  "topic_seat_detection": "seat_detection",
+  "topic_can_sensor": "canbus_test",
+  "hadoop_job_path": "hdfs://namenode:9000/user/parallels/job",
+  "hadoop_checkpoint_path": "hdfs://namenode:9000/user/parallels/checkpoint"
+}

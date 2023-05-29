@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package proto;
+option go_package = "bus-project/proto";
+
+message BusLocation {
+    double lat = 1;
+    double long = 2;
+    int64 timestamp = 3;
+}
+
+import "google/protobuf/empty.proto";
+
+service BusLocationService {
+    rpc Send(BusLocation) returns (google.protobuf.Empty) {}
+}

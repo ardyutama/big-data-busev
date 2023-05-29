@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package proto;
+option go_package = "bus-project/proto";
+
+message FatigueDetection {
+    int32 status = 1;
+    int64 timestamp = 2;
+}
+
+import "google/protobuf/empty.proto";
+
+service FatigueDetectionService {
+    rpc Send(FatigueDetection) returns (google.protobuf.Empty) {}
+}
