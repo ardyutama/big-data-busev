@@ -7,6 +7,9 @@ makeHadoop:
 makeCassandra:
 		docker exec cassandra cqlsh -u cassandra -p cassandra -f /cassandraQuery.cql
 
+makeCassandraNew:
+		docker exec cassandra cqlsh -u cassandra -p cassandra -f /newCassandraQuery.cql
+		
 stopSensor:
 		docker container stop seat_detection
 		docker container stop driver_fatigue

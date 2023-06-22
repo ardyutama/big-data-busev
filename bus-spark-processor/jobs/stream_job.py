@@ -8,28 +8,28 @@ from driver_fatigue_pb2 import FatigueDetection
 from seat_detection_pb2 import SeatDetection
 from canbus_test_pb2 import CANBusMessage
 import cantools
+import json
 
 LONG_MESSAGE = {}
 mc = MessageConverter()
 dbc = cantools.database.load_file('./j1939.dbc')
 dbc.add_dbc_file('./iso.dbc')
 
-def parsedRawData(df, proto):
+def parseProtoKafka(df, proto):
     # Parsed Protobuf encryption
-    parsedData = df.withColumn('parsed', mc.from_protobuf('value', proto)) \
+    parsedData = df.withColumn('firstparsed', mc.from_protobuf('value', proto)) \
         .withColumn('topic', expr('headers')[0]['value'].cast('string')) \
         .withColumn('bus_id', expr('headers')[2]['value'].cast('string')) \
-        .select('topic','bus_id', 'parsed.*') \
+        .selectExpr('topic','bus_id', 'firstparsed.*') \
         .withColumn('timestamp', to_timestamp(col('timestamp') / 1000))
-
+    
     return parsedData
 
-def convertToFloat(dictData):
-        return dict([key, float(value)]
-            for key, value in dictData.items())
-
-def parser(ID_HEX,DLC,DATA_HEX_STR):
-        ID_HEX = int.from_bytes(ID_HEX, "big")
+def parse_can_message(ID_HEX,DLC,DATA_HEX_STR):
+        try:
+            ID_HEX = int.from_bytes(ID_HEX, "big")
+        except:
+            pass
         DATA_LEN = int(DLC)
         PRIORITY = ID_HEX & (0b00011100 << 24)
         RESERVED = ID_HEX & (0b00000010 << 24)
@@ -44,14 +44,26 @@ def parser(ID_HEX,DLC,DATA_HEX_STR):
             currMsg = dbc.get_message_by_frame_id(DBC_ID)
             try:
                 outdata = dbc.decode_message(DBC_ID,DATA_HEX_STR,decode_choices=True)
-                return convertToFloat(outdata)
+                if(outdata):
+                    for key in outdata.keys():
+                        if not isinstance(outdata[key], int) and not isinstance(outdata[key], float) and not isinstance(outdata[key], str):
+                            outdata[key] = str(outdata[key])
+                    outdata["MessageName"] = currMsg.name
+                    json_data = json.dumps(outdata)
+                    return json_data
             except:
                 if currMsg.frame_id in LONG_MESSAGE.keys():
                     LONG_MESSAGE[currMsg.frame_id] = f"{LONG_MESSAGE[currMsg.frame_id]}{DATA_HEX_STR}"
                     try:
                         outdata = dbc.decode_message(DBC_ID,LONG_MESSAGE[currMsg.frame_id],decode_choices=True)
+                        if(outdata):
+                            for key in outdata.keys():
+                                if not isinstance(outdata[key], int) and not isinstance(outdata[key], float) and not isinstance(outdata[key], str):
+                                    outdata[key] = str(outdata[key])
+                        outdata["MessageName"] = currMsg.name
                         del LONG_MESSAGE[currMsg.frame_id]
-                        return convertToFloat(outdata)
+                        json_data = json.dumps(outdata)
+                        return json_data    
                     except:
                         pass
                 else:
@@ -59,24 +71,6 @@ def parser(ID_HEX,DLC,DATA_HEX_STR):
         except:
             pass
           
-def parseMessageName(ID_HEX):
-    ID_HEX = int.from_bytes(ID_HEX, "big")
-    PRIORITY = ID_HEX & (0b00011100 << 24)
-    RESERVED = ID_HEX & (0b00000010 << 24)
-    DATA_PAGE = ID_HEX & (0b00000001 << 24)
-    PDU_FORMAT = ID_HEX & (0b11111111 << 16)
-    PDU_SPECIFIC = ID_HEX & (0b11111111 << 8)
-    
-    PGN = RESERVED | DATA_PAGE | PDU_FORMAT | PDU_SPECIFIC
-    DBC_ID = PRIORITY | PGN | 0xFE
-    try:
-        currMsg = dbc.get_message_by_frame_id(DBC_ID)
-        try: 
-            return currMsg.name
-        except:
-               pass
-    except:
-        pass
     
 def writeToHDFS(ds,topic, job_path, checkpoint_path):
     return ds \
@@ -141,7 +135,7 @@ def main():
             .option('startingOffsets', 'latest') \
             .option("maxOffsetsPerTrigger", 1000) \
             .load() \
-            .selectExpr("value", "headers",'timestamp')
+            .selectExpr("headers","CAST(key AS STRING)", "value","timestamp")
 
         topicBusLocation = kafkaStream.select(col('headers'),col('value')).where(expr('headers')[0]['value'].cast('string')=='bus_location')
         topicFatigueDriver = kafkaStream.select(col('headers'),col('value')).where(expr('headers')[0]['value'].cast('string')=="driver_fatigue_detection")
@@ -150,30 +144,24 @@ def main():
         log.warn('kafka stream is done')
         
         # transform kafka stream dataframe 
-        DriverFatigueRaw = parsedRawData(topicFatigueDriver, FatigueDetection)
-        SeatDetectionRaw = parsedRawData(topicSeatDetection, SeatDetection)
+        DriverFatigueRaw = parseProtoKafka(topicFatigueDriver, FatigueDetection)
+        SeatDetectionRaw = parseProtoKafka(topicSeatDetection, SeatDetection)
         SeatDetectionRaw = SeatDetectionRaw.withColumnRenamed('seatNumber','seat_number')
-        BusLocationRaw = parsedRawData(topicBusLocation, BusLocation)
-        parsedCan = parsedRawData(topicCanSensor,CANBusMessage)
+        BusLocationRaw = parseProtoKafka(topicBusLocation, BusLocation)
+        parsedCan = parseProtoKafka(topicCanSensor,CANBusMessage)
         log.warn('parsing kafka value is done')
 
-        finalParsing = parsedCan.withColumn('newvalue', mc.from_protobuf('canId', CANBusMessage)) \
-                .select('topic','bus_id','newvalue.*')
-                
-        parserMessage = udf(lambda m,n,o: parser(m,n,o),MapType(StringType(),StringType()))
-        parserMessageName = udf(lambda m: parseMessageName(m))
+        parserCan = udf(lambda m,n,o: parse_can_message(m,n,o))
         
-        CanSensorRaw = finalParsing.withColumn("value", to_json(parserMessage('canId','dlc','data'))) \
-                        .withColumn('message_name',when(parserMessageName('canId').isNull(),'null')
-                            .otherwise(parserMessageName('canId'))) \
-                        .withColumnRenamed('canId','can_id')
+        CanSensorRaw = parsedCan.withColumn('parsedCanId', mc.from_protobuf('canId', CANBusMessage)) \
+                .select('topic','bus_id','parsedCanId.*') \
+                .withColumnRenamed('canId','can_id') \
+                .withColumn("value", parserCan('can_id','dlc','data'))
                         
-        CanBusData = CanSensorRaw.withColumn('headers', array(struct(lit("MqttTopic").alias("key"), lit(b'canbus_data').alias("value")),struct(lit("MqttSenderClientId").alias("key"), col('bus_id').cast('binary').alias("value")))) \
-            .withColumn('value', to_json(struct(col('value').cast('string').alias("value"),col('message_name'))))
+        CanBusData = CanSensorRaw.withColumn('headers', array(struct(lit("MqttTopic").alias("key"), lit(b'canbus_data').alias("value")),struct(lit("MqttSenderClientId").alias("key"), col('bus_id').cast('binary').alias("value"))))
         
-        writeToConsole(CanSensorRaw,"append")
         writeToConsole(CanBusData,"append")
-                
+        
         # write to Hadoop HDFS
         writeToHDFS(DriverFatigueRaw,config['topic_driver_fatigue'], config['hadoop_job_path'], config['hadoop_checkpoint_path'])
         writeToHDFS(SeatDetectionRaw, config['topic_seat_detection'],config['hadoop_job_path'], config['hadoop_checkpoint_path'])
@@ -194,7 +182,7 @@ def main():
             .trigger(processingTime='5 seconds')\
             .start()
 
-        CanSensorRaw.selectExpr('bus_id','message_name','can_id','dlc','data','value','timestamp') \
+        CanSensorRaw.selectExpr('bus_id','can_id','dlc','data','value','timestamp') \
             .writeStream \
             .foreachBatch(writeSensorCanCassandra) \
             .outputMode('update')\
